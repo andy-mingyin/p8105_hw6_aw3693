@@ -1,0 +1,264 @@
+---
+title: "Homework 6"
+author: "Mingyin Wang"
+date: "2024-12-02"
+output: github_document
+---
+
+load packages
+```{r, include=FALSE}
+library(tidyverse)
+library(modelr)
+library(purrr)
+library(p8105.datasets)
+```
+
+## Problem 1
+load dataframe
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+Bootstrap Function
+
+```{r}
+compute_bootstrap <- function(data) {
+  # Fit linear model
+  model <- lm(tmax ~ tmin, data = data)
+  
+  # Extract R-squared
+  r_squared <- broom::glance(model)$r.squared
+  
+  # Extract coefficients
+  coefs <- broom::tidy(model)$estimate
+  log_beta <- log(coefs[1] * coefs[2])
+  
+  tibble(r_squared = r_squared, log_beta = log_beta)
+}
+```
+
+bootstrap
+```{r}
+set.seed(1) 
+
+# Generate bootstrap samples
+bootstrap_results = weather_df |>
+  bootstrap(n = 5000) |>
+  mutate(
+    estimates = map(strap, ~ compute_bootstrap(as.data.frame(.x)))
+  ) |>
+  unnest(estimates)
+```
+
+Compute confidence interval
+```{r}
+ci_results = bootstrap_results %>%
+  summarise(
+    r_squared_lower = quantile(r_squared, 0.025),
+    r_squared_upper = quantile(r_squared, 0.975),
+    log_beta_lower = quantile(log_beta, 0.025),
+    log_beta_upper = quantile(log_beta, 0.975)
+  )
+
+```
+
+Plot the distribution
+```{r}
+bootstrap_results |>
+  ggplot(aes(x = log_beta)) +
+  geom_histogram(bins = 50, fill = "blue", alpha = 0.7) +
+  labs(
+    title = "Bootstrap Distribution of log(β0* β1)",
+    x = "log(β0* β1)",
+    y = "Frequency"
+  )
+```
+The distribution is approximately symmetric, with values ranging from 1.95 to 2.10 and a peak around 2.02, indicating stable and consistent estimates across bootstrap samples. The narrow spread suggests robustness in the linear model used to predict tmax from tmin. A 95% confidence interval, derived from the 2.5% and 97.5% quantiles of the distribution, would provide a reliable range of plausible values for log(β0* β1). 
+
+
+ 
+## Problem 2 
+
+load data
+```{r}
+url = "https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv"
+homicide_data = read_csv(url)
+head(homicide_data)
+```
+
+Create `city_state` variable and clean the data
+```{r}
+homicide_cleaned = homicide_data |>
+  # Create city_state variable
+  mutate(city_state = paste(city, state, sep = ", "),
+         victim_age = as.numeric(victim_age)) |>
+  # Filter the dataset
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+         victim_race %in% c("White", "Black"), # Keep only White and Black races
+         !is.na(victim_age),                  # Remove rows with missing victim_age
+         !is.na(disposition))                  
+```
+
+Create a Binary Outcome Variable for Solved Cases
+```{r}
+
+ homicide_cleaned =  homicide_cleaned |>
+  mutate(solved = if_else(str_detect(disposition, "Closed"), 1, 0))
+```
+
+Logistic Regression for Baltimore, MD
+```{r}
+baltimore_data = homicide_cleaned |>
+  filter(city_state == "Baltimore, MD")
+
+# Fit logistic regression model
+baltimore_model = glm(solved ~ victim_age + victim_sex + victim_race,
+                       data = baltimore_data,
+                       family = binomial)
+
+
+baltimore_results = tidy(baltimore_model, conf.int = TRUE, exponentiate = TRUE)
+
+baltimore_results
+```
+ Logistic Regression for All Cities
+ 
+```{r}
+## Nest data by city_state
+nested_data = homicide_cleaned |>
+  group_by(city_state) |>
+  nest()
+
+# Define a function to fit logistic regression and tidy the results
+fit_model = function(df) {
+  glm(solved ~ victim_age + victim_sex + victim_race, data = df, family = binomial) %>%
+    tidy(conf.int = TRUE, exponentiate = TRUE) |>
+    filter(term == "victim_sexMale")
+}
+
+# Apply the function to each city
+results <- nested_data %>%
+  mutate(model_results = map(data, fit_model)) %>%
+  unnest(model_results)
+
+ 
+```
+create the plot
+
+```{r}
+
+results %>%
+  ggplot(aes(x = reorder(city_state, estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Odds Ratios for Solving Homicides by City",
+    x = "City",
+    y = "Odds Ratio (Male vs Female Victims)"
+  ) +
+  theme_minimal()
+```
+ 
+
+## Problem 3
+
+load data
+```{r}
+birthweight_data = read_csv("data/birthweight.csv")
+head(birthweight_data)
+```
+```{r}
+
+birthweight_data_cleaned <- birthweight_data %>%
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present")),
+    mrace = factor(mrace),
+    frace = factor(frace)
+  ) %>%
+  drop_na() 
+```
+linear model
+```{r}
+proposed_model = lm(bwt ~ babysex + bhead + blength + delwt + gaweeks + wtgain, 
+                     data = birthweight_data_cleaned)
+summary(proposed_model)
+```
+use add_predictions and add_residuals in making this plot
+```{r}
+data_with_residuals = birthweight_data_cleaned |>
+  add_predictions(proposed_model) |>
+  add_residuals(proposed_model)
+
+data_with_residuals |>
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Fitted Values (Predicted Birth Weight)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+two other models
+One using length at birth and gestational age as predictors (main effects only)
+One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+```{r}
+proposed_formula = bwt ~ gaweeks + blength + bhead + wtgain
+model1_formula = bwt ~ blength + gaweeks
+model2_formula = bwt ~ bhead * blength * babysex
+```
+
+cross validation
+```{r}
+cv_data = crossv_mc(birthweight_data_cleaned, 10)
+
+```
+
+```{r}
+
+# Function to compute RMSE for a given formula
+compute_rmse <- function(train, test, formula) {
+  model <- lm(formula, data = train)
+  rmse(model, test)
+}
+
+# Apply RMSE calculation across folds
+cv_results <- cv_data %>%
+  mutate(
+    proposed_rmse = map2_dbl(train, test, ~ compute_rmse(.x, .y, proposed_formula)),
+    model1_rmse = map2_dbl(train, test, ~ compute_rmse(.x, .y, model1_formula)),
+    model2_rmse = map2_dbl(train, test, ~ compute_rmse(.x, .y, model2_formula))
+  )
+```
+
+
+```{r}
+cv_results_summary <- cv_results %>%
+  summarise(
+    proposed_avg_rmse = mean(proposed_rmse),
+    model1_avg_rmse = mean(model1_rmse),
+    model2_avg_rmse = mean(model2_rmse)
+  )
+# View the summary
+cv_results_summary
+```
+Proposed Model: Should perform well due to inclusion of relevant predictors.
+Model 1: Likely to have higher RMSE as it uses fewer predictors.
+Model 2: May overfit due to the inclusion of multiple interactions.
+
+
+
+
+
